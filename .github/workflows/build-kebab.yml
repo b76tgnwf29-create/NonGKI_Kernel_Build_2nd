@@ -445,6 +445,27 @@ jobs:
       - name: ⑥ 去掉 kprobe（4.19 厂商内核必须）
         uses: ./.github/workflows/patch-no-kprobe
 
+      # ── 老内核 × 新工具链：GCC 10+ 默认 -fno-common，4.19 的 dtc 会因此链接失败 ──
+      - name: ⑥-B 老内核兼容修正（yylloc 重复定义 / -fcommon）
+        shell: bash
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE/device_kernel"
+          echo "=== dtc-lexer.l 里的 yylloc ==="
+          grep -n 'yylloc' scripts/dtc/dtc-lexer.l | head -5 || true
+          # 上游 Linux 5.4 的修法：lexer 不再自己定义 yylloc（parser.tab.c 会生成一份）
+          sed -i 's/^YYLTYPE yylloc;$/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
+          sed -i 's/^static YYLTYPE yylloc;$/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
+          grep -n 'yylloc;' scripts/dtc/dtc-lexer.l | head -3 || true
+          # 兜底：host 工具加 -fcommon（老内核多处依赖 common 符号）
+          if ! grep -q 'fcommon' scripts/dtc/Makefile; then
+            sed -i 's|^HOSTCFLAGS_dtc-lexer\.lex\.o := -I\$(src)$|HOSTCFLAGS_dtc-lexer.lex.o := -I$(src) -fcommon|' scripts/dtc/Makefile
+            sed -i 's|^HOSTCFLAGS_dtc-parser\.tab\.o := -I\$(src)$|HOSTCFLAGS_dtc-parser.tab.o := -I$(src) -fcommon|' scripts/dtc/Makefile
+          fi
+          echo "=== dtc/Makefile 里的 HOSTCFLAGS ==="
+          grep -n 'HOSTCFLAGS_dtc' scripts/dtc/Makefile || true
+          echo "[+] yylloc / -fcommon 修正已应用"
+
       - name: ⑦ 额外内核选项
         shell: bash
         run: |
