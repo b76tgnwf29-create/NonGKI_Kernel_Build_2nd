@@ -1,1 +1,1 @@
-trigger 2026-11-15 17:10  (run 23 · 换回交叉 GNU ld，解 LLD 对齐检查)
+trigger 2026-11-15 17:24  (run 24 · 修 set -e 跳出 + GNU ld)
