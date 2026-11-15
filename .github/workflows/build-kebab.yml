@@ -736,6 +736,33 @@ jobs:
             echo "[+] 已加 -fno-builtin-stpcpy"
           fi
 
+          # ══════════ 修 ksu_su_compat_enabled 的对齐（run 22/24 真根因）══════════
+          # 两轮实测、两个链接器报的是同一个符号，说明这不是链接器问题：
+          #   run 22  ld.lld : improper alignment for relocation R_AARCH64_LDST32_ABS_LO12_NC
+          #   run 24  GNU ld : relocation truncated to fit: R_AARCH64_LDST32_ABS_LO12_NC
+          #                    against symbol 'ksu_su_compat_enabled'
+          #                    defined in .data..read_mostly section
+          # 触发点：fs/open.c(.text+0xbfc)、fs/stat.c、fs/exec.c
+          #
+          # 真因：上游 kernel/feature/sucompat.c 第 4 行
+          #     bool ksu_su_compat_enabled __read_mostly = true;
+          # bool 只有 1 字节，放进 .data..read_mostly 段后不保证 4 字节对齐；
+          # 而 fs/*.c 里生成的是 LDR W（32 位加载，要求地址 4 字节对齐），
+          # 落点不是 4 的倍数时两种链接器都会拒绝。给变量加 __aligned(4) 即解。
+          SUC="drivers/kernelsu/feature/sucompat.c"
+          SUH="drivers/kernelsu/feature/sucompat.h"
+          if [ -f "$SUC" ] && ! grep -q 'ksu_su_compat_enabled.*__aligned' "$SUC"; then
+            # 用 awk 拼行，避免 sed 的  反向引用在 YAML/heredoc 里被转义吃掉
+            awk '{ if ($1=="bool" && $2=="ksu_su_compat_enabled" && $3=="__read_mostly" && !done) { print "bool ksu_su_compat_enabled __read_mostly __aligned(4) = true;"; done=1 } else print }' "$SUC" > "$SUC.new" && mv "$SUC.new" "$SUC"
+            echo "[+] sucompat.c 已加 __aligned(4)"
+            grep -n 'ksu_su_compat_enabled' "$SUC" | head -2
+          fi
+          if [ -f "$SUH" ] && ! grep -q 'ksu_su_compat_enabled.*__aligned' "$SUH"; then
+            sed -i -E 's/^extern[[:space:]]+bool[[:space:]]+ksu_su_compat_enabled;$/extern bool ksu_su_compat_enabled __aligned(4);/' "$SUH"
+            echo "[+] sucompat.h 已加对齐声明"
+            grep -n 'ksu_su_compat_enabled' "$SUH" | head -2
+          fi
+
           # 实测上游 event.c：第 81、258 行都写 ksu_strncpy_from_user_nofault(...)，
           # 只有第 143 行写成裸 strncpy_from_user_nofault(...) —— 上游笔误。
           # 4.19 没有裸版函数，于是 implicit declaration → 编译失败。
