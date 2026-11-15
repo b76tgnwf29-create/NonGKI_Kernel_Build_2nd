@@ -1,1 +1,1 @@
-trigger 2026-11-15 11:48  (run 5 · defconfig 6 行占位修复)
+trigger 2026-11-15 12:11  (run 6 · dtc yylloc/-fcommon 修正)
