@@ -641,6 +641,23 @@ jobs:
             echo "=== kpm.c 里的 access_ok 调用 ==="
             grep -n 'access_ok' "$KPM_C" | head -4
           fi
+
+          # ══════════ 修上游 sulog/event.c 的漏前缀（run 18 根因）══════════
+          # 实测上游 event.c：第 81、258 行都写 ksu_strncpy_from_user_nofault(...)，
+          # 只有第 143 行写成裸 strncpy_from_user_nofault(...) —— 上游笔误。
+          # 4.19 没有裸版函数，于是 implicit declaration → 编译失败。
+          # (run 17 我用宏定义裸名去补，反而与上游 char* 版撞成 conflicting types；
+          #  这次只改这一处调用，不动任何定义。)
+          EVT="drivers/kernelsu/sulog/event.c"
+          if [ -f "$EVT" ]; then
+            N=$(grep -c '[^_[:alnum:]]strncpy_from_user_nofault(' "$EVT" 2>/dev/null || echo 0)
+            if [ "$N" -gt 0 ]; then
+              sed -i -E 's/(^|[^_[:alnum:]])strncpy_from_user_nofault\(/\1ksu_strncpy_from_user_nofault(/g' "$EVT"
+              echo "[+] event.c 补上 ksu_ 前缀（$N 处）"
+            fi
+            echo "=== event.c 里的 nofault 调用 ==="
+            grep -n 'nofault' "$EVT" | head -5
+          fi
           # SukiSU 的 kernel_includes.h 无条件 #include <linux/static_call.h>，
           # 而该头是 5.10 才引入的（4.19 实测 404）。KSU 代码里并不真正调用
           # static_call，只是头文件传递依赖，所以给一个空桩即可。
