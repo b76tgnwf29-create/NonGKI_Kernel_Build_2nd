@@ -120,7 +120,12 @@ env:
 
   # ══════════════════ 构建选项 ══════════════════
   CUSTOM_CMDS   : "CLANG_TRIPLE=aarch64-linux-gnu-"
-  EXTRA_CMDS    : "LD=ld.lld LLVM=1 LLVM_IAS=1"
+  # 用交叉工具链自带的 GNU ld，不用 ld.lld。
+  # 原因（run 22 实测）：4.19 的 fs/open.c、fs/stat.c、fs/exec.o 里存在
+  #   relocation R_AARCH64_LDST32_ABS_LO12_NC ... not aligned to 4 bytes
+  # 这是 LLD 的严格对齐检查，而 4.19 时代的代码是按 GNU ld 的宽容行为写的
+  # （GNU ld 会对这类地址自动做对齐补偿）。换 GNU ld 即解，不必改源码。
+  EXTRA_CMDS    : "LLVM_IAS=1"
   PYTHON_VERSION: "3"
   # 首次如果因为 .rej 直接失败，保持 false 让构建继续；稳定后再改 true
   BUILD_DEBUGGER: "false"
@@ -576,6 +581,22 @@ jobs:
             *":$SHIM:"*) echo "[!] shim 在 PATH 里了，移除"; PATH=$(echo "$PATH" | tr ':' '\n' | grep -vx "$SHIM" | paste -sd: -); export PATH ;;
             *) echo "[+] PATH 中没有 shim（宿主 x86 编译安全）" ;;
           esac
+
+          # ── 连接器检查：本轮从 ld.lld 换回交叉 GNU ld ──
+          # run 22 实测 ld.lld 对 4.19 老代码报
+          #   relocation R_AARCH64_LDST32_ABS_LO12_NC ... not aligned to 4 bytes
+          # （fs/open.o do_faccessat、fs/stat.o vfs_statx、fs/exec.o __do_execve_file）
+          # 这是 LLD 的严格对齐检查；GNU ld 会对这类地址做宽容处理，与 4.19 写法兼容。
+          echo "=== 连接器 ==="
+          for d in "$GITHUB_WORKSPACE"/gcc-64/bin "$GITHUB_WORKSPACE"/gcc-32/bin; do
+            [ -d "$d" ] && ls "$d" 2>/dev/null | grep -E '^[a-z0-9_]+-ld$' | head -2 | sed "s|^|  $d: |"
+          done
+          if [ -x "$GITHUB_WORKSPACE/gcc-64/bin/aarch64-linux-android-ld" ]; then
+            echo "  PASS 交叉 GNU ld 存在"
+            "$GITHUB_WORKSPACE/gcc-64/bin/aarch64-linux-android-ld" --version 2>/dev/null | head -1 | sed 's/^/  /'
+          else
+            echo "  WARN 没找到 aarch64-linux-android-ld"
+          fi
           [ -f Makefile.bak.el ] || cp Makefile Makefile.bak.el
           if grep -q -- '--prefix=$(GCC_TOOLCHAIN_DIR)' Makefile; then
             sed -i "s|--prefix=\$(GCC_TOOLCHAIN_DIR)|--prefix=$SHIM/|" Makefile
