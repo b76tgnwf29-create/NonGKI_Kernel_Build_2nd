@@ -580,6 +580,21 @@ jobs:
           grep -n -- '--prefix=' Makefile | head -3
           grep -n -- '-no-integrated-as' Makefile | head -3
 
+          # ── 把 -Werror=<警告> 降级成普通警告 ──
+          # run 14 实测：编译推进到 drivers/input/touchscreen 后死在这里：
+          #   ftsIO.c:93:29: error: a function declaration without a prototype is
+          #   deprecated in all versions of C [-Werror,-Wstrict-prototypes]
+          # 4.19 时代的厂商驱动普遍写 `void foo()`，新版 clang 会警告；
+          # 而顶层 Makefile 第 942-954 行用 cc-option 把若干警告提成了 -Werror。
+          # 刷机不追求零警告，把这类 -Werror= 全部降级，保留真错误。
+          WERR=$(grep -cE '^KBUILD_CFLAGS.*-Werror=' Makefile || true)
+          echo "=== 降级 -Werror（$WERR 处） ==="
+          sed -i -E 's/^(\s*KBUILD_CFLAGS\s*\+=\s*\$\(call cc-option,)-Werror=/\1-W/' Makefile
+          grep -nE '^KBUILD_CFLAGS.*-Werror=' Makefile | head -5 || echo "  （已无 -Werror=）"
+          # CLANG_FLAGS 里那条也降级
+          sed -i -E 's/CLANG_FLAGS\s*\+=\s*-Werror=unknown-warning-option/CLANG_FLAGS += -Wno-unknown-warning-option/' Makefile
+          grep -n 'unknown-warning-option' Makefile | head -2
+
           echo "  AS=${AS:-<unset>} CROSS_COMPILE=${CROSS_COMPILE:-<unset>} CLANG_TRIPLE=${CLANG_TRIPLE:-<unset>}"
           echo "[+] yylloc / -fcommon / -EL / 集成汇编器 修正已应用"
 
