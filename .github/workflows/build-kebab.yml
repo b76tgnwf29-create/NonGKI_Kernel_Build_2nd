@@ -208,6 +208,19 @@ jobs:
           #      **这是唯一能保证与这台手机完全一致的来源。**
           #   2. 仓库根的 stock_boot.img —— 直接解析（96 MB，一般不传）。
           # 两者都没有，才让后面的档位逻辑走兜底并打警告。
+          #
+          # ★ CRLF 防御：uname.env 常常是在 Windows 上生成的（ikconfig.py --env）。
+          #   一旦带 \r，值末尾会粘连 \\r，写进 Makefile / setlocalversion 后表现为
+          #     "SUBLEVEL 无法解析" / "setlocalversion 输出 '-perf+" / "uname -r: 4"
+          #   —— run 27 实测就是这么挂的（④-E 第 4 组 5 个 FAIL）。
+          #   这里**无条件先规整成 LF**，不依赖上游怎么传。
+          if [ -f "$GITHUB_WORKSPACE/uname.env" ]; then
+            if grep -qU $'\r' "$GITHUB_WORKSPACE/uname.env" 2>/dev/null; then
+              echo "[!] uname.env 含 CRLF，正在规整成 LF"
+              sed -i 's/\r$//' "$GITHUB_WORKSPACE/uname.env"
+            fi
+          fi
+
           INJECTED=0
           if [ -s "$GITHUB_WORKSPACE/uname.env" ]; then
             echo "::group::[+] 版本串来自 uname.env（目标手机自身 boot.img 解析结果）"
@@ -217,6 +230,11 @@ jobs:
               echo "VERSION_SOURCE=stock-uname-env" >> "$GITHUB_ENV"
               INJECTED=1
               echo "[+] 已注入；来源标记 stock-uname-env（已证，与目标机一致）"
+              # 自证：逐个 echo 关键值，肉眼就能看出有没有多余的空白/回车
+              echo "  复核 >> STOCK_LOCALVERSION=[${STOCK_LOCALVERSION}]"
+              echo "  复核 >> STOCK_SUBLEVEL=[${STOCK_SUBLEVEL}]"
+              echo "  复核 >> STOCK_BUILD_HOST=[${STOCK_BUILD_HOST}]"
+              echo "  复核 >> STOCK_COMPILER=[${STOCK_COMPILER}]"
             else
               echo "[!] uname.env 存在但没有 STOCK_UNAME_RELEASE 行，视为无效，继续往下找"
               head -5 "$GITHUB_WORKSPACE/uname.env" || true
@@ -546,16 +564,28 @@ jobs:
           done
 
           echo "=== 4. 版本串 ==="
+          # 先查 CRLF 污染：run 27 实测就是 uname.env 带 \r 导致
+          # SUBLEVEL 解析失败 / setlocalversion 输出 '-perf+ / uname -r: 4
+          CRHIT=0
+          for f in Makefile scripts/setlocalversion "$DEF"; do
+            if [ -f "$f" ] && grep -qU $'\r' "$f" 2>/dev/null; then
+              CRHIT=1
+              f "文件含 CRLF：$f（来自 uname.env 的 \\r 污染）"
+            fi
+          done
+          [ "$CRHIT" = "0" ] && p "Makefile / setlocalversion / defconfig 均无 CRLF"
+
           grep -q "CONFIG_LOCALVERSION=\"-perf+\"" "$DEF" && p "LOCALVERSION=-perf+" || f "LOCALVERSION 不是 -perf+"
           grep -q "^VERSION = 4$"     Makefile && p "Makefile VERSION=4"     || f "Makefile VERSION 不对"
           grep -q "^PATCHLEVEL = 19$" Makefile && p "Makefile PATCHLEVEL=19" || f "Makefile PATCHLEVEL 不对"
           if grep -qE "^SUBLEVEL = [0-9]+$" Makefile; then
             p "Makefile SUBLEVEL=$(grep -E '^SUBLEVEL = ' Makefile | tr -dc '0-9')"
           else
-            f "Makefile SUBLEVEL 无法解析"
+            f "Makefile SUBLEVEL 无法解析 —— 明细：$(grep -E '^SUBLEVEL' Makefile | cat -A | head -1)"
           fi
-          SL=$(bash scripts/setlocalversion 2>/dev/null || true)
-          [ "$SL" = "-perf+" ] && p "setlocalversion 输出 -perf+" || f "setlocalversion 输出 '$SL'"
+          SL=$(bash scripts/setlocalversion 2>/dev/null | tr -d '\r' || true)
+          [ "$SL" = "-perf+" ] && p "setlocalversion 输出 -perf+" \
+            || f "setlocalversion 输出 '$SL'（应为 -perf+；若尾部有多余字符查 CRLF）"
 
           echo "=== 5. SUSFS 补丁 ==="
           # 注意：② build-env 里有 `mv $GITHUB_WORKSPACE/Patches /tmp/`，
@@ -814,13 +844,27 @@ jobs:
             fi
           fi
 
-          # fdinfo.c 的拒块是可选的（SUS_KSTAT / SUS_MOUNT 隐藏增强），
-          # 补上 include 让它至少有定义，hunk 本体缺失不影响开机。
-          if [ -f fs/notify/fdinfo.c ] && ! grep -q 'susfs' fs/notify/fdinfo.c; then
-            if [ -f include/linux/susfs.h ]; then
-              echo "[!] fs/notify/fdinfo.c 未打上 SUSFS hunk（非致命），仅补 include"
-              sed -i '1i #ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#endif' fs/notify/fdinfo.c
-            fi
+          # ══════════ fdinfo.c 拒块补偿（run 26 诊断材料实测暴露）══════════
+          # SUSFS 补丁给 fs/notify/fdinfo.c 准备了三个 hunk，在一加 SM8250 源码上
+          # **全部被拒**（.rej 实测 2 个）。旧版本只插了个 include，功能体从未补上，
+          # 注释还写着"非致命"——这是错的：
+          #
+          #   /proc/<pid>/fdinfo/<fd> 里 inotify 每行打印 "inotify wd:%x ino:%lx sdev:%x ..."
+          #   其中 ino/sdev 是 **inode 号和块设备号**。检测方可以：
+          #     a = stat("/data/local/tmp/fsvc")   → 已被 SUS_KSTAT 伪造成 AAA
+          #     b = 读持有该 fd 的进程的 fdinfo     → 真实 ino BBB
+          #   两边不一致 = 直接证明文件被动过。SUSFS 的
+          #   susfs_sus_kstat_spoof_inotify_fdinfo() 就是为让 b 也变成 AAA 而存在。
+          #
+          # 实现放在 code/patch_fdinfo.py（可自测、可 --check / --revert），
+          # 这里只调用。细节与判死理由见该文件头注释。
+          if [ -f fs/notify/fdinfo.c ]; then
+            python3 "$GITHUB_WORKSPACE/patch_fdinfo.py" . || {
+              echo "[!] patch_fdinfo.py 失败（不致命，继续编）"
+            }
+            echo "=== fdinfo.c 现状 ==="
+            python3 "$GITHUB_WORKSPACE/patch_fdinfo.py" . --check || true
+            grep -c 'susfs' fs/notify/fdinfo.c || true
           fi
 
           # ══════════ KSU 4.19 ABI 兼容（run 16/17 实测演进）══════════
