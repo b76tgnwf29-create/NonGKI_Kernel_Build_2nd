@@ -200,6 +200,19 @@ jobs:
             echo "VERSION_SOURCE=fallback" >> "$GITHUB_ENV"
             echo "SAFE_BUILD=1" >> "$GITHUB_ENV"
             KONA="$GITHUB_WORKSPACE/device_kernel/arch/arm64/configs/vendor/kona-perf_defconfig"
+            # 优先用仓库根目录的 defconfig_stock.txt：它是从一加原厂 boot.img 的 IKCONFIG
+            # 提取的真实配置（5000+ 行，2026-11-15 由 OOS 11.0.9.9 EU boot.img 提取，
+            # 内核串实测 4.19.110-perf+，与目标完全一致）。只传 ~100 KB 文本，
+            # 不需要把 96 MB 的 boot.img 塞进仓库。
+            OV="$GITHUB_WORKSPACE/defconfig_stock.txt"
+            OV_LINES=$( { wc -l < "$OV"; } 2>/dev/null || echo 0 )
+            if [ "${OV_LINES:-0}" -gt 2000 ]; then
+              cp "$OV" "$DEF"
+              echo "[+] 用仓库内 defconfig_stock.txt（原厂 IKCONFIG，${OV_LINES} 行）覆盖 $DEF"
+              echo "VERSION_SOURCE=stock-ikconfig" >> "$GITHUB_ENV"
+              echo "[+] defconfig 行数：$(wc -l < "$DEF")"
+              exit 0
+            fi
             # 判据不能只看"文件不存在"：上游 build-ready 的 "Set KSU and SUSFS for DEFCONFIG"
             # 会往一个还不存在的 defconfig 里 `>>` 追加 6 行（CONFIG_KSU=y / CONFIG_KSU_SUSFS=y 等），
             # 于是文件"存在但只有 6 行"，"不存在才复制"永远不成立。
@@ -336,6 +349,8 @@ jobs:
           out.append('CONFIG_KALLSYMS=y')
           out.append('CONFIG_KALLSYMS_ALL=y')
           out.append('CONFIG_KPM=y')
+          out.append('CONFIG_KSU=y')
+          out.append('CONFIG_KSU_SUSFS=y')
           out.append('CONFIG_IKCONFIG=y')
           out.append('CONFIG_IKCONFIG_PROC=y')
           out.append('# disable module sig force, otherwise vendor .ko (lcd/touch/audio) rejected')
@@ -490,11 +505,26 @@ jobs:
             echo "=== 其它构建文件里没有 -EL ==="
           fi
 
-          # 探针：把工具链真实身份写进日志（下一轮定位直接看这里）
-          echo "=== 探针：工具链 ==="
-          (clang --version 2>/dev/null | head -2) || echo "  clang 不可用"
+          # ── 工具链断根：4.19 的三处历史写法必须一起改 ──
+          # run 5/6/7/8 连续四轮死在 ⑫ 开头，报的都是同一句：
+          #   /usr/bin/as: unrecognized option '-EL'  →  scripts/mod/empty.o 失败
+          # 真因是 4.19 顶层 Makefile 里这两行（实测 grep 得到）：
+          #   L371: AS      = $(CROSS_COMPILE)as        ← aarch64-as 不在 PATH 就落成 x86 as
+          #   L509: CLANG_FLAGS += -no-integrated-as    ← 逼 clang 用外部汇编器，不用自带 LLVM IAS
+          # 光清 -EL 没用（run 7 精确清、run 8 广谱清，⑫ 仍报），必须让 clang 用集成汇编器。
+          if grep -qE '^CLANG_FLAGS[[:space:]]*\+=[[:space:]]*-no-integrated-as' Makefile; then
+            sed -i -E 's/^CLANG_FLAGS[[:space:]]*\+=[[:space:]]*-no-integrated-as/# [patched] removed -no-integrated-as (use LLVM integrated assembler)/' Makefile
+            echo "[+] 已注释 -no-integrated-as"
+          fi
+          if grep -qE '^AS[[:space:]]*=[[:space:]]*\$\(CROSS_COMPILE\)as' Makefile; then
+            sed -i -E 's/^AS[[:space:]]*=[[:space:]]*\$\(CROSS_COMPILE\)as/AS\t\t= $(CC)/' Makefile
+            echo "[+] 已把 AS 指向 \$(CC)（arm64 的 .S 与 as-instr 探针都走 clang）"
+          fi
+          echo "=== 确认补丁结果 ==="
+          grep -nE '^(AS[[:space:]]*=|CLANG_FLAGS.*integrated-as|# \[patched\] removed -no-integrated)' Makefile | head -5
+
           echo "  AS=${AS:-<unset>} CROSS_COMPILE=${CROSS_COMPILE:-<unset>} CLANG_TRIPLE=${CLANG_TRIPLE:-<unset>}"
-          echo "[+] yylloc / -fcommon / -EL 修正已应用"
+          echo "[+] yylloc / -fcommon / -EL / 集成汇编器 修正已应用"
 
       - name: ⑦ 额外内核选项
         shell: bash
