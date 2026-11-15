@@ -333,7 +333,8 @@ jobs:
           drop = ["CONFIG_MODULE_SIG", "CONFIG_MODULE_SIG_FORCE", "CONFIG_MODULE_SIG_ALL",
                   "CONFIG_MODULE_FORCE_LOAD", "CONFIG_LOCALVERSION",
                   "CONFIG_LOCALVERSION_AUTO", "CONFIG_KALLSYMS", "CONFIG_KALLSYMS_ALL",
-                  "CONFIG_KPM", "CONFIG_IKCONFIG", "CONFIG_IKCONFIG_PROC"]
+                  "CONFIG_KPM", "CONFIG_IKCONFIG", "CONFIG_IKCONFIG_PROC",
+                  "CONFIG_MODVERSIONS", "CONFIG_DEBUG_INFO"]
           lines = open(p, encoding='utf-8', errors='replace').read().splitlines()
           out = []
           for ln in lines:
@@ -358,6 +359,10 @@ jobs:
           out.append('# CONFIG_MODULE_SIG_FORCE is not set')
           out.append('# CONFIG_MODULE_SIG_ALL is not set')
           out.append('CONFIG_MODULE_FORCE_LOAD=y')
+          # MODVERSIONS 关掉：run 20 实测 ld.lld 在生成 __kcrctab 时报
+          #   relocation R_AARCH64_ABS32 cannot be used against '__crc_*'; recompile with -fPIC
+          # 关掉后内核不校验模块 CRC，原厂 .ko（lcd/touch/audio）反而更容易加载。
+          out.append('# CONFIG_MODVERSIONS is not set')
           # ── 关掉 DEBUG_INFO（同时解决 DWARF 冲突与产物体积） ──
           # run 13 实测：编译跑到 security/selinux 才炸，报
           #   /tmp/netlink-xxxx.s:11: Error: junk at end of line, first unrecognized character is `"'
@@ -664,6 +669,45 @@ jobs:
           echo "=== 已追加的 -Wno-* / -Wno-error ==="
           grep -c 'Wno-' Makefile
           tail -3 Makefile
+
+          # ══════════ vmlinux 链接期两处修复（run 20 根因）══════════
+          # run 20 已编译完全部源码（5509 行日志，AR built-in.a + MODPOST 都过了），
+          # 死在最后链接 vmlinux 的两条：
+          #
+          # ① ld.lld: error: undefined symbol: stpcpy
+          #    referenced by tty_io.c(show_cons_active) / apparmor lsm.c(param_get_*)
+          #    → 新版 clang 优化器把 strcpy 改写成 stpcpy（LLVM 已知行为），
+          #      而 4.19 的 lib/string.c 没有 stpcpy（5.x 才加）。
+          #    修法：补实现 + 传 -fno-builtin-stpcpy 双保险。
+          #
+          # ② ld.lld: error: relocation R_AARCH64_ABS32 cannot be used against
+          #    symbol '__crc_gsi_write_channel_scratch'; recompile with -fPIC
+          #    → CONFIG_MODVERSIONS 生成的 __kcrctab 段在 LLD 下要 -fPIC。
+          #      关掉 MODVERSIONS 正合本意：我们要让原厂 .ko（lcd/touch/audio）能加载，
+          #      不校验 CRC 反而更容易成功。
+          if [ -f lib/Makefile ] && ! grep -q 'ksu_compat_string' lib/Makefile; then
+            printf '%s\n' \
+              '/* stpcpy: 4.19 没有；新版 clang 会把 strcpy 优化成本函数调用 */' \
+              '#include <linux/string.h>' \
+              '#include <linux/export.h>' \
+              '#ifndef __HAVE_ARCH_STPCPY' \
+              'char *stpcpy(char *dest, const char *src)' \
+              '{' \
+              '    while ((*dest++ = *src++) != 0)' \
+              '        ;' \
+              '    return dest - 1;' \
+              '}' \
+              'EXPORT_SYMBOL(stpcpy);' \
+              '#endif' > lib/ksu_compat_string.c
+            sed -i 's/^lib-y := ctype\.o string\.o/lib-y := ctype.o string.o ksu_compat_string.o/' lib/Makefile
+            echo "[+] 已加 lib/ksu_compat_string.c（stpcpy 实现）"
+            grep -n 'lib-y := ' lib/Makefile | head -1
+          fi
+          if ! grep -q 'fno-builtin-stpcpy' Makefile; then
+            printf 'KBUILD_CFLAGS += -fno-builtin-stpcpy\n' >> Makefile
+            echo "[+] 已加 -fno-builtin-stpcpy"
+          fi
+
           # 实测上游 event.c：第 81、258 行都写 ksu_strncpy_from_user_nofault(...)，
           # 只有第 143 行写成裸 strncpy_from_user_nofault(...) —— 上游笔误。
           # 4.19 没有裸版函数，于是 implicit declaration → 编译失败。
