@@ -464,7 +464,19 @@ jobs:
           fi
           echo "=== dtc/Makefile 里的 HOSTCFLAGS ==="
           grep -n 'HOSTCFLAGS_dtc' scripts/dtc/Makefile || true
-          echo "[+] yylloc / -fcommon 修正已应用"
+
+          # 4.19 的 arch/arm64/Makefile 会给 AS / LDFLAGS 塞 -EL（小端历史写法）。
+          # 现代 aarch64 as 不认 -EL，clang 会把它当 mips 选项转发给 /usr/bin/as：
+          #   /usr/bin/as: unrecognized option '-EL' → assembler command failed → scripts/mod/empty.o 失败
+          if grep -qE '^AS[[:space:]]*\+=[[:space:]]*-EL$' arch/arm64/Makefile; then
+            sed -i -E 's/^AS[[:space:]]*\+=[[:space:]]*-EL$/AS +=/' arch/arm64/Makefile
+          fi
+          if grep -qE '^KBUILD_LDFLAGS[[:space:]]*\+=[[:space:]]*-EL[[:space:]]' arch/arm64/Makefile; then
+            sed -i -E 's/^KBUILD_LDFLAGS[[:space:]]*\+=[[:space:]]*-EL[[:space:]]/KBUILD_LDFLAGS += /' arch/arm64/Makefile
+          fi
+          echo "=== arch/arm64/Makefile 里残留的 -EL ==="
+          grep -n -- '-EL' arch/arm64/Makefile || echo "  （已清空）"
+          echo "[+] yylloc / -fcommon / -EL 修正已应用"
 
       - name: ⑦ 额外内核选项
         shell: bash
