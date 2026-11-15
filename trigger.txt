@@ -1,1 +1,1 @@
-trigger 2026-11-15 13:56  (run 12 · shim 裸名+triple，不进 PATH)
+trigger 2026-11-15 14:12  (run 13 · KSU 改 manual 克隆，避开 429)
