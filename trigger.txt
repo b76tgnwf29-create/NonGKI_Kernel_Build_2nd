@@ -1,1 +1,1 @@
-trigger 2026-11-15 14:43  (run 15 · 降级 -Werror，救厂商驱动)
+trigger 2026-11-15 15:10  (run 16 · 补 SUSFS namei include + static_call 桩)
