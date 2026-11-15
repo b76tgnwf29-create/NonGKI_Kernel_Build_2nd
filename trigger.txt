@@ -1,1 +1,1 @@
-trigger 2026-11-15 15:40  (run 18 · kpm 走上游 ksu_access_ok 宏)
+trigger 2026-11-15 15:56  (run 19 · event.c 补 ksu_ 前缀)
