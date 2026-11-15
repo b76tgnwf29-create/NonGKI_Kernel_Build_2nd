@@ -642,7 +642,28 @@ jobs:
             grep -n 'access_ok' "$KPM_C" | head -4
           fi
 
-          # ══════════ 修上游 sulog/event.c 的漏前缀（run 18 根因）══════════
+          # 4.19 的顶层 Makefile 把 -Wno-unused-but-set-variable 只写在 GCC 分支（else，764 行），
+          # clang 分支（if cc-name==clang）根本没有它 → 新版 clang 直接把这类风格警告当错误
+          # （run 19 实测 drivers/vservices/session.c:1907 死在 -Wunused-but-set-variable）。
+          # 厂商驱动里"设了没用/定义了没引用"的写法极多，刷机不追求零警告。
+          # 先逐个关具体告警，再补一条 -Wno-error 兜底（防止将来换个 clang 版本又冒新警告）。
+          for w in unused-but-set-variable unused-variable unused-const-variable \
+                   unused-value unused-function unused-label address-of-packed-member \
+                   misleading-indentation bool-operation; do
+            if ! grep -q "Wno-$w" Makefile; then
+              printf 'KBUILD_CFLAGS += -Wno-%s\n' "$w" >> Makefile
+            fi
+          done
+          # 兜底：把"所有警告降级为提示"。放在文件末尾 → 后出现者生效，
+          # 覆盖前面 line 425 的 -Wall 与任何 -Werror= 细则。
+          # 注意：-Werror=implicit-function-declaration 这类"真 bug"仍可能生效，
+          # 那是我们想保留的（隐式声明通常意味着真缺头文件）。
+          if ! grep -qx 'KBUILD_CFLAGS += -Wno-error' Makefile; then
+            printf '\n# [build-kebab] 厂商老驱动不追求零警告，全局降级\nKBUILD_CFLAGS += -Wno-error\n' >> Makefile
+          fi
+          echo "=== 已追加的 -Wno-* / -Wno-error ==="
+          grep -c 'Wno-' Makefile
+          tail -3 Makefile
           # 实测上游 event.c：第 81、258 行都写 ksu_strncpy_from_user_nofault(...)，
           # 只有第 143 行写成裸 strncpy_from_user_nofault(...) —— 上游笔误。
           # 4.19 没有裸版函数，于是 implicit declaration → 编译失败。
