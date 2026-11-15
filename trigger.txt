@@ -1,1 +1,1 @@
-trigger 2026-11-15 16:40  (run 21 · stpcpy 补实现 + 关 MODVERSIONS)
+trigger 2026-11-15 16:47  (run 22 · stpcpy + MODVERSIONS 正确版)
