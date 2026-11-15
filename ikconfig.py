@@ -181,6 +181,11 @@ UNAME_RE = re.compile(rb'Linux version (\S+) \(([^@)\s]+)@([^)\s]+)\)[\x20-\x7e]
 STAMP_RE = re.compile(
     rb'((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) '
     rb'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +\d+ \d\d:\d\d:\d\d \S+ \d{4})')
+# banner 里第二对括号就是 LINUX_COMPILER 宏的内容，形如：
+#   Linux version 4.19.110-perf+ (jenkins@rd-build-90) (clang version 10.0.5 for Android NDK) #1 SMP ...
+# 这一串会被编进 linux_banner，`cat /proc/version` 直接读得到，SUSFS 的 SPOOF_UNAME
+# 只 hook newuname，管不到它 —— 所以必须让编译期产生的值本身就是原厂的。
+COMPILER_RE = re.compile(rb'\) \(([^)]*version [^)]*)\)')
 
 
 def parse_uname(kernel):
@@ -202,6 +207,8 @@ def parse_uname(kernel):
         return None, f"release 串无法拆成 X.Y.Z: {release}"
     ts_m = STAMP_RE.search(m.group(0))
     stamp = re.sub(r'\s+', ' ', ts_m.group(1).decode('latin1')).strip() if ts_m else ""
+    cmp_m = COMPILER_RE.search(m.group(0))
+    compiler = re.sub(r'\s+', ' ', cmp_m.group(1).decode('latin1')).strip() if cmp_m else ""
     return {
         'uname_release': release,
         'version': mm.group(1),
@@ -211,6 +218,7 @@ def parse_uname(kernel):
         'user': user,
         'host': host,
         'timestamp': stamp,
+        'compiler': compiler,
         'raw': raw,
     }, None
 
@@ -305,6 +313,7 @@ def main():
             ('STOCK_BUILD_USER', info['user']),
             ('STOCK_BUILD_HOST', info['host']),
             ('STOCK_BUILD_TIMESTAMP', info['timestamp']),
+            ('STOCK_COMPILER', info['compiler']),
         ]
         if emit_env:
             # --env 模式必须**只**输出 KEY=VALUE：这份输出会直接进 $GITHUB_ENV
