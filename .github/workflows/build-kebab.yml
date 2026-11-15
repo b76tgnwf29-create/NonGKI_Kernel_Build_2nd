@@ -165,8 +165,12 @@ jobs:
               echo "[+] no-kpm：KPM 不进 inline hook，sus_map 仍在（frida 检测照样能过）"
               ;;
             safe-defconfig)
-              echo "DEFCONFIG_NAME=vendor/kona-perf_defconfig" >> "$GITHUB_ENV"
-              echo "[+] safe-defconfig：改用一加官方 kona 平台通用配置"
+              # 关键：**不能**改 DEFCONFIG_NAME。上游 composite action 里读的是
+              # ${{ env.DEFCONFIG_NAME }}（workflow 级 env），GITHUB_ENV 覆盖不到它，
+              # 改了反而让 make 去找一个不存在的 defconfig（实测 16 秒即失败）。
+              # 正确做法：名字保持不变，由 ④-C 把 kona-perf_defconfig 复制成 kebab_defconfig。
+              echo "SAFE_BUILD=1" >> "$GITHUB_ENV"
+              echo "[+] safe-defconfig：用源码自带 kona-perf_defconfig 兜底（不改 defconfig 名）"
               ;;
             *)
               echo "[-] 未知 profile: $PROFILE"
@@ -195,9 +199,15 @@ jobs:
             echo "    ⚠ 产物仅用于验证编译链，不要刷机（版本串未经镜像证实）"
             echo "VERSION_SOURCE=fallback" >> "$GITHUB_ENV"
             echo "SAFE_BUILD=1" >> "$GITHUB_ENV"
+            KONA="$GITHUB_WORKSPACE/device_kernel/arch/arm64/configs/vendor/kona-perf_defconfig"
             if [ ! -s "$DEF" ]; then
-              echo "[FATAL] 源码里没有 $DEF，这一档也跑不了"
-              exit 1
+              if [ -f "$KONA" ]; then
+                cp "$KONA" "$DEF"
+                echo "[+] 已从 kona-perf_defconfig 复制出 $DEF"
+              else
+                echo "[FATAL] 既没有 $DEF 也没有 $KONA，这一档跑不了"
+                exit 1
+              fi
             fi
             echo "[+] defconfig 行数：$(wc -l < "$DEF")"
             exit 0
