@@ -81,7 +81,7 @@ env:
   KERNELSU_BRANCH   : ""
   KERNELSU_AUTO_GET : "true"
   KERNELSU_AUTO_FORK: "sukisu"
-  KERNELSU_METHOD   : "shell"
+  KERNELSU_METHOD   : "manual"
   # ★ 4.19 厂商内核必须 syscall，kprobe 会误触发 Safe Mode
   HOOK_METHOD       : "syscall"
 
@@ -521,11 +521,14 @@ jobs:
           # 修法：造一个 shim 目录，把交叉工具链的 as/ld/... 按 clang 期望的名字
           #      （<CLANG_TRIPLE 去尾横线>-as，即 aarch64-linux-gnu-as）链进去，
           #      --prefix 指向它。--prefix 必须保留，-no-integrated-as 也必须保留。
-          # 注意：shim 只放**带 triple 前缀**的名字，且**绝不进 PATH**。
-          # run 10 实测教训：把 shim 加进 PATH 并放裸 as 后，宿主编译
-          # （HOSTCC 编 scripts/basic/fixdep，x86_64）也走了 aarch64 的 as，
-          # 报 `as: unrecognized option '--64'`。
-          # 4.19 的 AS = $(CROSS_COMPILE)as 本身就是完整路径，本来就对，不需要 PATH 帮忙。
+          # ⚠ 关键：clang 的 --prefix 是**字符串前缀拼接**，clang 实际执行的是
+          #      <prefix>as        （不是 <prefix><triple>-as）
+          # 所以 shim 里必须有**裸 as**。但裸 as 绝不能进 PATH —— 否则宿主编译
+          # （HOSTCC 编 scripts/basic/fixdep，x86_64）也会用 aarch64 的 as，
+          # 报 `as: unrecognized option '--64'`（run 10 实测）。
+          # 结论：裸名 + 带 triple 名都放，但**不 export PATH、不写 GITHUB_PATH**。
+          # run 11 的教训：只放带 triple 名 → clang 找不到 <prefix>as → 回落到
+          # /usr/bin/as → 又报 -EL。
           SHIM="$GITHUB_WORKSPACE/crossshim"
           rm -rf "$SHIM"
           mkdir -p "$SHIM"
@@ -533,24 +536,29 @@ jobs:
           for t in as ld ar nm strip objcopy objdump elfedit; do
             src=$(ls "$GITHUB_WORKSPACE"/gcc-64/bin/*-"$t" 2>/dev/null | head -1)
             if [ -n "$src" ]; then
+              ln -sf "$src" "$SHIM/$t" 2>/dev/null || cp "$src" "$SHIM/$t"
               ln -sf "$src" "$SHIM/aarch64-linux-gnu-$t" 2>/dev/null || cp "$src" "$SHIM/aarch64-linux-gnu-$t"
               SHIM_N=$((SHIM_N+1))
             fi
           done
-          echo "=== 交叉 shim 目录（$SHIM_N 项，仅 clang --prefix 使用，不进 PATH） ==="
-          ls "$SHIM" 2>/dev/null | head -12
-          if [ -e "$SHIM/aarch64-linux-gnu-as" ]; then
-            echo "[+] aarch64-linux-gnu-as -> $(readlink -f "$SHIM/aarch64-linux-gnu-as" 2>/dev/null || echo ok)"
-            # 自证：这个 as 必须认识 arm64 参数
+          echo "=== 交叉 shim（$SHIM_N 项，裸名+triple 双套；不进 PATH） ==="
+          ls "$SHIM" 2>/dev/null | head -20
+          if [ -e "$SHIM/as" ]; then
+            echo "[+] shim/as -> $(readlink -f "$SHIM/as" 2>/dev/null || echo ok)"
             printf 'nop\n' > /tmp/_probe.s
-            if "$SHIM/aarch64-linux-gnu-as" -EL -o /tmp/_probe.o /tmp/_probe.s 2>/dev/null; then
+            if "$SHIM/as" -EL -o /tmp/_probe.o /tmp/_probe.s 2>/dev/null; then
               echo "  PASS shim/as 接受 -EL（真交叉汇编器）"
             else
-              echo "  WARN shim/as 不接受 -EL，检查链接目标"
+              echo "  WARN shim/as 不接受 -EL"
             fi
           else
-            echo "[FATAL] 交叉 as 缺失（gcc-64/bin 里没有 *-as），⑫ 会退化成 x86 as"
+            echo "[FATAL] shim/as 缺失（gcc-64/bin 里没有 *-as）"
           fi
+          # 必须确认 PATH 里没有 shim（run 10 的坑）
+          case ":$PATH:" in
+            *":$SHIM:"*) echo "[!] shim 在 PATH 里了，移除"; PATH=$(echo "$PATH" | tr ':' '\n' | grep -vx "$SHIM" | paste -sd: -); export PATH ;;
+            *) echo "[+] PATH 中没有 shim（宿主 x86 编译安全）" ;;
+          esac
           [ -f Makefile.bak.el ] || cp Makefile Makefile.bak.el
           if grep -q -- '--prefix=$(GCC_TOOLCHAIN_DIR)' Makefile; then
             sed -i "s|--prefix=\$(GCC_TOOLCHAIN_DIR)|--prefix=$SHIM/|" Makefile
