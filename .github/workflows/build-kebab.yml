@@ -588,14 +588,21 @@ jobs:
           # （fs/open.o do_faccessat、fs/stat.o vfs_statx、fs/exec.o __do_execve_file）
           # 这是 LLD 的严格对齐检查；GNU ld 会对这类地址做宽容处理，与 4.19 写法兼容。
           echo "=== 连接器 ==="
-          for d in "$GITHUB_WORKSPACE"/gcc-64/bin "$GITHUB_WORKSPACE"/gcc-32/bin; do
-            [ -d "$d" ] && ls "$d" 2>/dev/null | grep -E '^[a-z0-9_]+-ld$' | head -2 | sed "s|^|  $d: |"
-          done
+          # 注意：本步骤开头有 set -e，循环体最后一条命令返回非 0 会让整个脚本退出
+          # （run 23 实测：gcc-32/bin 不存在 → [ -d ] 返回 1 → ⑥-B 直接失败）。
+          # 所以这里每个条件判断都必须用 if，且末尾统一 || true。
+          for d in "$GITHUB_WORKSPACE/gcc-64/bin" "$GITHUB_WORKSPACE/gcc-32/bin"; do
+            if [ -d "$d" ]; then
+              ls "$d" 2>/dev/null | grep -E -- '-ld$' | head -2 | sed "s|^|  $(basename "$(dirname "$d")")/bin: |" || true
+            else
+              echo "  $d: 不存在"
+            fi
+          done || true
           if [ -x "$GITHUB_WORKSPACE/gcc-64/bin/aarch64-linux-android-ld" ]; then
             echo "  PASS 交叉 GNU ld 存在"
-            "$GITHUB_WORKSPACE/gcc-64/bin/aarch64-linux-android-ld" --version 2>/dev/null | head -1 | sed 's/^/  /'
+            "$GITHUB_WORKSPACE/gcc-64/bin/aarch64-linux-android-ld" --version 2>/dev/null | head -1 | sed 's/^/  /' || true
           else
-            echo "  WARN 没找到 aarch64-linux-android-ld"
+            echo "  WARN 没找到 aarch64-linux-android-ld（LD 会回落到 $(CROSS_COMPILE)ld）"
           fi
           [ -f Makefile.bak.el ] || cp Makefile Makefile.bak.el
           if grep -q -- '--prefix=$(GCC_TOOLCHAIN_DIR)' Makefile; then
