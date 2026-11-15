@@ -615,7 +615,53 @@ jobs:
             fi
           fi
 
-          # ══════════ static_call.h 兼容桩（4.19 没有这个头）══════════
+          # ══════════ KSU 4.19 API 兼容层（run 16 根因）══════════
+          # run 16 编译推进到 drivers/kernelsu（fs/ 已全过），只剩 KSU 自身用了 4.19 没有的 API：
+          #   1) kpm.c:182  access_ok(addr, size)          —— 4.19 是 access_ok(type, addr, size) 三参
+          #      → "too few arguments provided to function-like macro invocation"
+          #   2) sulog/event.c:143  strncpy_from_user_nofault —— 4.19 无此函数（5.x 才有）
+          #      → "implicit declaration of function"
+          # 做法：在 KSU 的 include 目录放一个兼容头，用宏映射到 4.19 的等价实现，
+          # 不去改上游源码（下次更新覆盖掉就白改了）。
+          KSU_INC="drivers/kernelsu/include"
+          mkdir -p "$KSU_INC"
+          printf '%s\n' \
+            '/* 4.19 compatibility shims for SukiSU (added by build-kebab.yml) */' \
+            '#ifndef _KSU_COMPAT_419_H' \
+            '#define _KSU_COMPAT_419_H' \
+            '#include <linux/version.h>' \
+            '#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)' \
+            '#include <linux/uaccess.h>' \
+            '#include <linux/sched.h>' \
+            '' \
+            '/* 4.19 access_ok 需要 3 个参数；新版只传 2 个 */' \
+            '#define KSU_ACCESS_OK_2(addr, size) access_ok(VERIFY_WRITE, (addr), (size))' \
+            '' \
+            '/* 4.19 无 strncpy_from_user_nofault：用 probe_kernel_read 等价实现 */' \
+            'static inline long ksu_strncpy_from_user_nofault(void *dst, const void __user *src, long count)' \
+            '{' \
+            '    return probe_kernel_read(dst, (const void *)src, (size_t)count);' \
+            '}' \
+            '#define strncpy_from_user_nofault ksu_strncpy_from_user_nofault' \
+            '#endif /* < 5.0 */' \
+            '#endif /* _KSU_COMPAT_419_H */' > "$KSU_INC/ksu_compat_419.h"
+          echo "[+] 已生成 $KSU_INC/ksu_compat_419.h"
+
+          # 让 KSU 每个 .c 都自动包含兼容头：往 KSU 的 Makefile 加 ccflags
+          if [ -f drivers/kernelsu/Makefile ] && ! grep -q 'ksu_compat_419' drivers/kernelsu/Makefile; then
+            printf '\n# 4.19 API 兼容（build-kebab.yml 注入）\nccflags-y += -include $(srctree)/drivers/kernelsu/include/ksu_compat_419.h\n' >> drivers/kernelsu/Makefile
+            echo "[+] KSU Makefile 已加 -include 兼容头"
+            tail -3 drivers/kernelsu/Makefile
+          fi
+
+          # kpm.c 的 access_ok 两参调用：就地改成三参（该文件只有这一处两参用法）
+          if [ -f drivers/kernelsu/extension/kpm/kpm.c ]; then
+            if grep -q 'access_ok(u64_to_user_ptr' drivers/kernelsu/extension/kpm/kpm.c; then
+              sed -i -E 's/access_ok\(u64_to_user_ptr\(([^)]*)\), sizeof\(result\)\)/access_ok(VERIFY_WRITE, u64_to_user_ptr(\1), sizeof(result))/g' drivers/kernelsu/extension/kpm/kpm.c
+              echo "[+] kpm.c access_ok 已改成三参"
+              grep -n 'access_ok' drivers/kernelsu/extension/kpm/kpm.c | head -3
+            fi
+          fi
           # SukiSU 的 kernel_includes.h 无条件 #include <linux/static_call.h>，
           # 而该头是 5.10 才引入的（4.19 实测 404）。KSU 代码里并不真正调用
           # static_call，只是头文件传递依赖，所以给一个空桩即可。
