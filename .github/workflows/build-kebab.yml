@@ -336,8 +336,9 @@ jobs:
             else
               cat /tmp/uname.err || true
               echo "VERSION_SOURCE=fallback" >> "$GITHUB_ENV"
-              echo "[!] 读不到版本串 → 回落默认 4.19.110-perf+ / jenkins@rd-build-77"
-              echo "[!] 这条一旦回落，刷完黑屏的概率显著上升。上机前必须用 adb shell cat /proc/version 复核"
+              echo "[!] 读不到版本串 → 回落默认 4.19.110-perf+ / jenkins@rd-build-90"
+              echo "[!] 兜底值是 OOS 11.0.9.9 的原厂实测值，**不一定等于你手机**"
+              echo "[!] 这条一旦回落，/proc/version 与原厂不符的概率显著上升。上机前必须 adb shell cat /proc/version 复核"
             fi
           fi
 
@@ -369,8 +370,12 @@ jobs:
           S="${STOCK_SUBLEVEL:-110}"
           LOCALV="${STOCK_LOCALVERSION:--perf+}"
           U="${STOCK_BUILD_USER:-jenkins}"
-          H="${STOCK_BUILD_HOST:-rd-build-77}"
-          T="${STOCK_BUILD_TIMESTAMP:-Tue Dec 21 14:19:26 CST 2021}"
+          # 兜底值必须与原厂实测值一致（实测自 OOS 11.0.9.9 EU 的 boot.img）：
+          #   jenkins@rd-build-90 / Mon Jul 12 10:08:43 CST 2021
+          # 早先这两行兜底写的是 rd-build-77 / Dec 21 2021（那是 GitHub runner 的真实
+          # 构建时间被误抄进兜底），一旦回落反而制造了一个"非原厂"特征。
+          H="${STOCK_BUILD_HOST:-rd-build-90}"
+          T="${STOCK_BUILD_TIMESTAMP:-Mon Jul 12 10:08:43 CST 2021}"
 
           echo "::group::[+] Version spoofing（来源：${VERSION_SOURCE:-fallback}）"
           echo "[+] 目标 uname -r: ${V}.${P}.${S}${LOCALV}"
@@ -567,6 +572,49 @@ jobs:
 
           echo "=== 6. 容量预算 ==="
           echo "  INFO  boot 分区 ${{ env.BOOT_PARTITION_BYTES }} B，Image 预算 ${{ env.BOOT_IMAGE_BUDGET }} B"
+
+          # ══════════ 7. 编译器串伪装前置检查 ══════════
+          # ④-A2 已经改过 scripts/mkcompile_h 并注入 KBUILD_FAKE_COMPILER。
+          # 这里在开编前确认两件事，避免白跑 45 分钟才发现 /proc/version 会露馅。
+          echo "=== 7. 编译器串伪装（/proc/version 的唯一真来源）==="
+          MK="scripts/mkcompile_h"
+          if [ -f "$MK" ] && grep -q 'KBUILD_FAKE_COMPILER' "$MK"; then
+            p "scripts/mkcompile_h 已支持 KBUILD_FAKE_COMPILER 覆盖"
+          else
+            f "scripts/mkcompile_h 未打补丁 —— /proc/version 会露出真实 clang 版本"
+          fi
+          if [ -n "$KBUILD_FAKE_COMPILER" ]; then
+            p "KBUILD_FAKE_COMPILER 已注入：'$KBUILD_FAKE_COMPILER'"
+            case "$KBUILD_FAKE_COMPILER" in
+              *19.*|*runner*|*llvm-project*)
+                f "注入的编译器串看起来是自编环境（$KBUILD_FAKE_COMPILER）"
+                ;;
+              *) p "注入值不含 19.x / runner / llvm-project 特征" ;;
+            esac
+          else
+            f "KBUILD_FAKE_COMPILER 为空 —— /proc/version 会用真实 \$CC -v"
+          fi
+
+          # ══════════ 8. 版本串来源可信度（不阻塞，但要醒目）══════════
+          echo "=== 8. 版本串来源 ==="
+          echo "  INFO  VERSION_SOURCE=${VERSION_SOURCE:-<unset>}"
+          case "${VERSION_SOURCE:-}" in
+            stock-uname-env)
+              p "来源=uname.env（目标手机自身 boot.img 解析，最可信）"
+              ;;
+            stock|stock-repo-boot)
+              p "来源=仓库 stock_boot.img（原厂镜像，但可能不是这台手机）"
+              ;;
+            stock-ikconfig)
+              echo "  WARN  来源=defconfig_stock.txt（只有 config，版本串可能是兜底值）"
+              ;;
+            fallback|"")
+              echo "  WARN  来源=兜底值 —— /proc/version 未必与原厂一致，别拿它当完美版"
+              ;;
+            *)
+              echo "  WARN  未知来源 '${VERSION_SOURCE}'"
+              ;;
+          esac
 
           echo "=== 目标 uname -r: $TARGET ==="
           if [ "$FAIL" = "0" ]; then
