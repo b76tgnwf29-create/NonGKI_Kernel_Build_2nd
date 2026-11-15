@@ -580,6 +580,58 @@ jobs:
           grep -n -- '--prefix=' Makefile | head -3
           grep -n -- '-no-integrated-as' Makefile | head -3
 
+          # ══════════ 修复 SUSFS 补丁被拒的 include（run 15 根因）══════════
+          # run 15 实测：⑤ 打 SUSFS 补丁时 fs/namei.c 的 include 段被拒（.rej），
+          # 因为一加原厂在 include 块里多插了 #ifdef CONFIG_FSC，patch 上下文对不上。
+          # 结果 fs/namei.c 里没有 <linux/susfs_def.h>，于是
+          #   ND_STATE_LOOKUP_LAST / ND_STATE_OPEN_LAST / SUSFS_IS_INODE_OPEN_REDIRECT* 全部未定义
+          # → 编译报 "use of undeclared identifier" / "implicit declaration"。
+          # 这不是编译器问题，是补丁没打全，必须手工补上。
+          if [ -f fs/namei.c ]; then
+            if ! grep -q 'susfs_def.h' fs/namei.c; then
+              echo "[!] fs/namei.c 缺 susfs_def.h include，补上"
+              # 插在 "internal.h" 之前（补丁原本的位置），用 awk 保证插一次
+              awk 'BEGIN{done=0}
+                   /^#include "internal.h"$/ && !done {
+                     print "#if defined(CONFIG_KSU_SUSFS_SUS_PATH) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)";
+                     print "#include <linux/susfs_def.h>";
+                     print "#endif";
+                     print "";
+                     done=1
+                   }
+                   {print}' fs/namei.c > fs/namei.c.new && mv fs/namei.c.new fs/namei.c
+              grep -n 'susfs_def.h' fs/namei.c | head -2
+            else
+              echo "[+] fs/namei.c 已有 susfs_def.h include"
+            fi
+          fi
+
+          # fdinfo.c 的拒块是可选的（SUS_KSTAT / SUS_MOUNT 隐藏增强），
+          # 补上 include 让它至少有定义，hunk 本体缺失不影响开机。
+          if [ -f fs/notify/fdinfo.c ] && ! grep -q 'susfs' fs/notify/fdinfo.c; then
+            if [ -f include/linux/susfs.h ]; then
+              echo "[!] fs/notify/fdinfo.c 未打上 SUSFS hunk（非致命），仅补 include"
+              sed -i '1i #ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#endif' fs/notify/fdinfo.c
+            fi
+          fi
+
+          # ══════════ static_call.h 兼容桩（4.19 没有这个头）══════════
+          # SukiSU 的 kernel_includes.h 无条件 #include <linux/static_call.h>，
+          # 而该头是 5.10 才引入的（4.19 实测 404）。KSU 代码里并不真正调用
+          # static_call，只是头文件传递依赖，所以给一个空桩即可。
+          if [ ! -f include/linux/static_call.h ]; then
+            echo "[!] 4.19 没有 include/linux/static_call.h，生成空桩"
+            # 用 printf 不用 heredoc：heredoc 在 YAML block scalar 里会破坏缩进
+            printf '%s\n' \
+              '/* stub for kernels < 5.10: SukiSU kernel_includes.h includes this unconditionally; KSU does not use static_call. */' \
+              '#ifndef _LINUX_STATIC_CALL_STUB_H' \
+              '#define _LINUX_STATIC_CALL_STUB_H' \
+              '#endif /* _LINUX_STATIC_CALL_STUB_H */' > include/linux/static_call.h
+            echo "[+] include/linux/static_call.h 已生成 ($(wc -l < include/linux/static_call.h) 行)"
+          else
+            echo "[+] static_call.h 已存在"
+          fi
+
           # ── 把 -Werror=<警告> 降级成普通警告 ──
           # run 14 实测：编译推进到 drivers/input/touchscreen 后死在这里：
           #   ftsIO.c:93:29: error: a function declaration without a prototype is
