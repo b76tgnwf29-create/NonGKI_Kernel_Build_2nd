@@ -318,9 +318,32 @@ def main():
         if emit_env:
             # --env 模式必须**只**输出 KEY=VALUE：这份输出会直接进 $GITHUB_ENV
             # 或被 shell `source`，掺任何标题行都会破坏解析。
+            #
+            # ★ 必须强制 LF 换行：Windows 上 print() 默认写 \r\n，产出 uname.env
+            #   传到 Linux runner 后，`\r` 会留在每个值末尾 —— 实测 run 27 的
+            #   症状就是 `STOCK_LOCALVERSION=-perf+\r` 被写进 Makefile 与
+            #   setlocalversion，于是 ④-E 报
+            #     "Makefile SUBLEVEL 无法解析" / "setlocalversion 输出 '-perf+"
+            #     "目标 uname -r: 4"（\r 把后面整行覆盖了）
+            #   同一个文件在 Windows 上用 cat 看着完全正常，极难肉眼发现。
+            #
+            # 注意：光用 sys.stdout.write("k=v\n") 在 Windows 上**仍然**会被
+            # 文本层翻译成 \r\n（实测 9 个 CR）。必须写到 stdout.buffer 且用
+            # bytes，才真正得到 LF。
+            out = sys.stdout
+            buf = getattr(out, 'buffer', None)
             for k, v in pairs:
                 if v:
-                    print(f"{k}={v}")
+                    v = str(v).replace('\r', '').replace('\n', ' ')
+                    line = f"{k}={v}\n"
+                    if buf is not None:
+                        buf.write(line.encode('utf-8'))
+                    else:
+                        out.write(line)
+            if buf is not None:
+                buf.flush()
+            else:
+                out.flush()
             if not info['timestamp']:
                 print("[WARN] 没解析到编译时间戳，KBUILD_BUILD_TIMESTAMP 需走兜底值",
                       file=sys.stderr)
