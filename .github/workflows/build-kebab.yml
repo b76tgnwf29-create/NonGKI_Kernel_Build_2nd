@@ -476,6 +476,24 @@ jobs:
           fi
           echo "=== arch/arm64/Makefile 里残留的 -EL ==="
           grep -n -- '-EL' arch/arm64/Makefile || echo "  （已清空）"
+
+          # -EL 可能不止在 arch/arm64/Makefile（厂商副本/其它 Makefile 也会塞）。
+          # arm64 默认小端，-EL 纯冗余，清掉无副作用；把改过的文件打出来作证据。
+          HIT=$(grep -rln -- '-EL' --include='Makefile' --include='Kbuild' --include='*.mk' . 2>/dev/null | grep -v '^\./out/' || true)
+          if [ -n "$HIT" ]; then
+            echo "=== 其它含 -EL 的构建文件（将被清理） ==="
+            echo "$HIT"
+            for f in $HIT; do
+              sed -i -E 's/(^|[[:space:]])-EL([[:space:]]|$)/\1\2/g' "$f"
+            done
+          else
+            echo "=== 其它构建文件里没有 -EL ==="
+          fi
+
+          # 探针：把工具链真实身份写进日志（下一轮定位直接看这里）
+          echo "=== 探针：工具链 ==="
+          (clang --version 2>/dev/null | head -2) || echo "  clang 不可用"
+          echo "  AS=${AS:-<unset>} CROSS_COMPILE=${CROSS_COMPILE:-<unset>} CLANG_TRIPLE=${CLANG_TRIPLE:-<unset>}"
           echo "[+] yylloc / -fcommon / -EL 修正已应用"
 
       - name: ⑦ 额外内核选项
