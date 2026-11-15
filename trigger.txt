@@ -1,1 +1,1 @@
-trigger 2026-11-15 14:12  (run 13 · KSU 改 manual 克隆，避开 429)
+trigger 2026-11-15 14:26  (run 14 · 关 DEBUG_INFO，解 DWARF5/.file 冲突)
