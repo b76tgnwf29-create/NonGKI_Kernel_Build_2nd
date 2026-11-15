@@ -358,6 +358,18 @@ jobs:
           out.append('# CONFIG_MODULE_SIG_FORCE is not set')
           out.append('# CONFIG_MODULE_SIG_ALL is not set')
           out.append('CONFIG_MODULE_FORCE_LOAD=y')
+          # ── 关掉 DEBUG_INFO（同时解决 DWARF 冲突与产物体积） ──
+          # run 13 实测：编译跑到 security/selinux 才炸，报
+          #   /tmp/netlink-xxxx.s:11: Error: junk at end of line, first unrecognized character is `"'
+          #   /tmp/netlink-xxxx.s:11: Error: file number less than one
+          # 这是 clang 生成的 DWARF5 `.file 0 "..."` 与 4.19 时代 GNU as 的老
+          # `.file 1 "..."` 格式不兼容，引号被判成 junk。
+          # 原厂 defconfig 里 CONFIG_DEBUG_INFO=y、DWARF4 未开（实测 4961-4964 行）。
+          # 刷机用的是 Image，不需要调试信息；关掉它同时省时间（40→25 分钟）与体积。
+          out.append('# CONFIG_DEBUG_INFO is not set')
+          out.append('# CONFIG_DEBUG_INFO_REDUCED is not set')
+          out.append('# CONFIG_DEBUG_INFO_DWARF4 is not set')
+          out.append('# CONFIG_GDB_SCRIPTS is not set')
           open(p, 'w', encoding='utf-8', newline='\n').write('\n'.join(out) + '\n')
           print('[+] defconfig rewritten:', p, len(out), 'lines')
           PYBLOCK
