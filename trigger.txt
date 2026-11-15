@@ -1,1 +1,1 @@
-trigger 2026-11-15 16:13  (run 20 · -Wno-error 兜底，厂商驱动不追求零警告)
+trigger 2026-11-15 16:40  (run 21 · stpcpy 补实现 + 关 MODVERSIONS)
