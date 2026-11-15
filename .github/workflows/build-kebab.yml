@@ -200,12 +200,27 @@ jobs:
             echo "VERSION_SOURCE=fallback" >> "$GITHUB_ENV"
             echo "SAFE_BUILD=1" >> "$GITHUB_ENV"
             KONA="$GITHUB_WORKSPACE/device_kernel/arch/arm64/configs/vendor/kona-perf_defconfig"
-            if [ ! -s "$DEF" ]; then
+            # 判据不能只看"文件不存在"：上游 build-ready 的 "Set KSU and SUSFS for DEFCONFIG"
+            # 会往一个还不存在的 defconfig 里 `>>` 追加 6 行（CONFIG_KSU=y / CONFIG_KSU_SUSFS=y 等），
+            # 于是文件"存在但只有 6 行"，"不存在才复制"永远不成立。
+            # run 4 实测：④-C 打印 行数=6 → ④-E 判 FAIL（defconfig 缺失或过短）。
+            DEF_LINES=$( { wc -l < "$DEF"; } 2>/dev/null || echo 0 )
+            if [ "${DEF_LINES:-0}" -lt 500 ]; then
               if [ -f "$KONA" ]; then
+                # 上游 append 的 KSU/SUSFS 开关必须回填，否则内核不编 SukiSU → 刷了也没 root
+                KEEP=$(grep -E '^CONFIG_(KSU|KSU_[A-Za-z0-9_]+)=' "$DEF" 2>/dev/null || true)
+                echo "[!] $DEF 只有 ${DEF_LINES:-0} 行（上游 append 占位），用 kona-perf_defconfig 覆盖"
                 cp "$KONA" "$DEF"
-                echo "[+] 已从 kona-perf_defconfig 复制出 $DEF"
+                if [ -n "$KEEP" ]; then
+                  printf '%s\n' "$KEEP" >> "$DEF"
+                  echo "[+] 已回填上游 KSU 开关：$(printf '%s' "$KEEP" | tr '\n' ' ')"
+                fi
+                for k in CONFIG_KSU=y CONFIG_KSU_SUSFS=y; do
+                  grep -qx "$k" "$DEF" || echo "$k" >> "$DEF"
+                done
+                echo "[+] 已从 kona-perf_defconfig 复制出 $DEF（$(wc -l < "$DEF") 行）"
               else
-                echo "[FATAL] 既没有 $DEF 也没有 $KONA，这一档跑不了"
+                echo "[FATAL] 既没有可用 $DEF 也没有 $KONA，这一档跑不了"
                 exit 1
               fi
             fi
@@ -352,7 +367,7 @@ jobs:
           fi
 
           echo "=== 2. 必需配置项 ==="
-          for k in CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_KPM CONFIG_MODULE_FORCE_LOAD; do
+          for k in CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_KPM CONFIG_MODULE_FORCE_LOAD CONFIG_KSU; do
             grep -qx "$k=y" "$DEF" && p "$k=y" || f "$k 未开"
           done
 
