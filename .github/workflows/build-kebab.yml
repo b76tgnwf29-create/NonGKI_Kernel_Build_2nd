@@ -505,23 +505,54 @@ jobs:
             echo "=== 其它构建文件里没有 -EL ==="
           fi
 
-          # ── 工具链断根：4.19 的三处历史写法必须一起改 ──
-          # run 5/6/7/8 连续四轮死在 ⑫ 开头，报的都是同一句：
-          #   /usr/bin/as: unrecognized option '-EL'  →  scripts/mod/empty.o 失败
-          # 真因是 4.19 顶层 Makefile 里这两行（实测 grep 得到）：
-          #   L371: AS      = $(CROSS_COMPILE)as        ← aarch64-as 不在 PATH 就落成 x86 as
-          #   L509: CLANG_FLAGS += -no-integrated-as    ← 逼 clang 用外部汇编器，不用自带 LLVM IAS
-          # 光清 -EL 没用（run 7 精确清、run 8 广谱清，⑫ 仍报），必须让 clang 用集成汇编器。
-          if grep -qE '^CLANG_FLAGS[[:space:]]*\+=[[:space:]]*-no-integrated-as' Makefile; then
-            sed -i -E 's/^CLANG_FLAGS[[:space:]]*\+=[[:space:]]*-no-integrated-as/# [patched] removed -no-integrated-as (use LLVM integrated assembler)/' Makefile
-            echo "[+] 已注释 -no-integrated-as"
+          # ── 工具链修正：4.19 必须用外部交叉 as，但要把路径指对 ──
+          # 结论演进（四轮实测）：
+          #   run 7/8 清 -EL → 无效，因为 -EL 是 arch/arm64 正常的 32 位小端标志，
+          #             https://…/arch/arm64/Makefile 就在小端分支写 AS += -EL
+          #   run 9   改用 LLVM 集成汇编器（去 -no-integrated-as）→ 进了真编译但 vdso 炸：
+          #             gettimeofday.S: too many positional arguments
+          #             note.S: changed section flags for .note.Linux
+          #             这是 4.19 老 GNU 汇编宏 vs 新 LLVM IAS 的已知不兼容
+          # 真因：顶层 Makefile
+          #   GCC_TOOLCHAIN_DIR := $(dir $(shell which $(CROSS_COMPILE)elfedit))
+          #   CLANG_FLAGS += --prefix=$(GCC_TOOLCHAIN_DIR)
+          # runner 上没有 <triple>elfedit → 该目录为空 → --prefix 为空 →
+          # clang 调裸 as → /usr/bin/as（x86 汇编器）→ 把 -EL 当 MIPS 选项报错。
+          # 修法：造一个 shim 目录，把交叉工具链的 as/ld/... 按 clang 期望的名字
+          #      （<CLANG_TRIPLE 去尾横线>-as，即 aarch64-linux-gnu-as）链进去，
+          #      --prefix 指向它。--prefix 必须保留，-no-integrated-as 也必须保留。
+          SHIM="$GITHUB_WORKSPACE/crossshim"
+          rm -rf "$SHIM"
+          mkdir -p "$SHIM"
+          SHIM_N=0
+          for t in as ld ar nm strip objcopy objdump elfedit; do
+            src=$(ls "$GITHUB_WORKSPACE"/gcc-64/bin/*-"$t" 2>/dev/null | head -1)
+            if [ -n "$src" ]; then
+              # 同时按两种名字放：clang --prefix 找的是 <triple>-as，
+              # 而 4.19 的 AS = $(CROSS_COMPILE)as 找的是裸 as。两种都命中才稳。
+              ln -sf "$src" "$SHIM/aarch64-linux-gnu-$t" 2>/dev/null || cp "$src" "$SHIM/aarch64-linux-gnu-$t"
+              ln -sf "$src" "$SHIM/$t" 2>/dev/null || cp "$src" "$SHIM/$t"
+              SHIM_N=$((SHIM_N+1))
+            fi
+          done
+          echo "=== 交叉 shim 目录（$SHIM_N 项） ==="
+          ls "$SHIM" 2>/dev/null | head -20
+          if [ -e "$SHIM/aarch64-linux-gnu-as" ] && [ -e "$SHIM/as" ]; then
+            echo "[+] aarch64-linux-gnu-as / as 均就位 -> $(readlink -f "$SHIM/aarch64-linux-gnu-as" 2>/dev/null || echo ok)"
+          else
+            echo "[FATAL] 交叉 as 缺失（gcc-64/bin 里没有 *-as），⑫ 会退化成 x86 as"
           fi
-          if grep -qE '^AS[[:space:]]*=[[:space:]]*\$\(CROSS_COMPILE\)as' Makefile; then
-            sed -i -E 's/^AS[[:space:]]*=[[:space:]]*\$\(CROSS_COMPILE\)as/AS\t\t= $(CC)/' Makefile
-            echo "[+] 已把 AS 指向 \$(CC)（arm64 的 .S 与 as-instr 探针都走 clang）"
+          # 双保险：shim 也进 PATH（给 AS=$(CROSS_COMPILE)as 那条调用路径用）
+          echo "$SHIM" >> "$GITHUB_PATH"
+          export PATH="$SHIM:$PATH"
+          [ -f Makefile.bak.el ] || cp Makefile Makefile.bak.el
+          if grep -q -- '--prefix=$(GCC_TOOLCHAIN_DIR)' Makefile; then
+            sed -i "s|--prefix=\$(GCC_TOOLCHAIN_DIR)|--prefix=$SHIM/|" Makefile
+            echo "[+] --prefix 已指向 shim"
           fi
-          echo "=== 确认补丁结果 ==="
-          grep -nE '^(AS[[:space:]]*=|CLANG_FLAGS.*integrated-as|# \[patched\] removed -no-integrated)' Makefile | head -5
+          echo "=== 确认：--prefix / -no-integrated-as ==="
+          grep -n -- '--prefix=' Makefile | head -3
+          grep -n -- '-no-integrated-as' Makefile | head -3
 
           echo "  AS=${AS:-<unset>} CROSS_COMPILE=${CROSS_COMPILE:-<unset>} CLANG_TRIPLE=${CLANG_TRIPLE:-<unset>}"
           echo "[+] yylloc / -fcommon / -EL / 集成汇编器 修正已应用"
