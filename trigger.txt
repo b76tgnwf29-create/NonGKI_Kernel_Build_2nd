@@ -1,1 +1,1 @@
-trigger profile=no-bbg run34 23:01:31 只关BBG
+trigger profile=no-nomount run35 23:21:33
