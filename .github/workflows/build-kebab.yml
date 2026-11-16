@@ -485,11 +485,20 @@ jobs:
           import os
           p = os.environ["DEF"]
           lv = os.environ["LOCALV"]
+          # ★ 2026-11-16 修正：CONFIG_MODVERSIONS 从 drop 列表移除。
+          # 原厂 /proc/config.gz 实测 CONFIG_MODVERSIONS=y，且手机所有 vendor .ko
+          # （audio / wlan / display / touch）的 vermagic 都是
+          #   4.19.110-perf+ SMP preempt mod_unload modversions aarch64
+          # 而 run29 自编产物是 ... mod_unload aarch64（少了 modversions）
+          # → 内核一启动，vendor 模块全部因 vermagic 不匹配被拒载 → 黑屏/重启 → 落 EDL。
+          # 这就是「fastboot boot 必掉 EDL」的真正原因（不是镜像结构、不是 defconfig）。
+          # 当初关掉它的理由是 run 20 的 ld.lld 报 R_AARCH64_ABS32 against '__crc_*'，
+          # 但 run 23 起已换成交叉 GNU ld（见 ⑥-B），该错误前提不复存在。
           drop = ["CONFIG_MODULE_SIG", "CONFIG_MODULE_SIG_FORCE", "CONFIG_MODULE_SIG_ALL",
                   "CONFIG_MODULE_FORCE_LOAD", "CONFIG_LOCALVERSION",
                   "CONFIG_LOCALVERSION_AUTO", "CONFIG_KALLSYMS", "CONFIG_KALLSYMS_ALL",
                   "CONFIG_KPM", "CONFIG_IKCONFIG", "CONFIG_IKCONFIG_PROC",
-                  "CONFIG_MODVERSIONS", "CONFIG_DEBUG_INFO"]
+                  "CONFIG_DEBUG_INFO"]
           lines = open(p, encoding='utf-8', errors='replace').read().splitlines()
           out = []
           for ln in lines:
@@ -514,10 +523,14 @@ jobs:
           out.append('# CONFIG_MODULE_SIG_FORCE is not set')
           out.append('# CONFIG_MODULE_SIG_ALL is not set')
           out.append('CONFIG_MODULE_FORCE_LOAD=y')
-          # MODVERSIONS 关掉：run 20 实测 ld.lld 在生成 __kcrctab 时报
-          #   relocation R_AARCH64_ABS32 cannot be used against '__crc_*'; recompile with -fPIC
-          # 关掉后内核不校验模块 CRC，原厂 .ko（lcd/touch/audio）反而更容易加载。
-          out.append('# CONFIG_MODVERSIONS is not set')
+          # ★ 2026-11-16：MODVERSIONS 必须开（原厂 =y），否则 vermagic 少 modversions
+          # → 所有 vendor .ko 被拒载 → 起不来。原厂 /proc/config.gz 与原厂 .ko 的
+          # vermagic 双向佐证，见 drop 列表上方的说明。
+          # 配套：MODULE_FORCE_LOAD=y 保证即使个别模块 CRC 不匹配也仍可加载（原厂未开此项）。
+          out.append('CONFIG_MODVERSIONS=y')
+          out.append('# CONFIG_MODULE_REL_CRCS is not set')
+          # 原厂 CONFIG_MODULES_USE_ELF_RELA=y（defconfig 已带，此处兜底确保不被冲掉）
+          out.append('CONFIG_MODULES_USE_ELF_RELA=y')
           # ── 关掉 DEBUG_INFO（同时解决 DWARF 冲突与产物体积） ──
           # run 13 实测：编译跑到 security/selinux 才炸，报
           #   /tmp/netlink-xxxx.s:11: Error: junk at end of line, first unrecognized character is `"'
@@ -554,7 +567,9 @@ jobs:
           fi
 
           echo "=== 2. 必需配置项 ==="
-          for k in CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_KPM CONFIG_MODULE_FORCE_LOAD CONFIG_KSU; do
+          # ★ CONFIG_MODVERSIONS 必须在列：原厂 =y，vendor .ko 的 vermagic 带 modversions。
+          # 少了它 → 所有 vendor 驱动被拒载 → 内核起不来 → 掉 EDL（run29 的真死因）。
+          for k in CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_KPM CONFIG_MODULE_FORCE_LOAD CONFIG_KSU CONFIG_MODVERSIONS CONFIG_MODULES_USE_ELF_RELA; do
             grep -qx "$k=y" "$DEF" && p "$k=y" || f "$k 未开"
           done
 
@@ -562,6 +577,17 @@ jobs:
           for k in CONFIG_MODULE_SIG CONFIG_MODULE_SIG_FORCE CONFIG_MODULE_SIG_ALL CONFIG_LOCALVERSION_AUTO; do
             if grep -qx "$k=y" "$DEF"; then f "$k 仍为 y"; else p "$k 未开"; fi
           done
+
+          echo "=== 3b. vermagic 目标串（供应商模块兼容的硬要求）==="
+          # 手机端实测：原厂 .ko 的 vermagic = 4.19.110-perf+ SMP preempt mod_unload modversions aarch64
+          # 内核侧必须同时具备 SMP / PREEMPT / MODULE_UNLOAD / MODVERSIONS 才能拼出同一串。
+          VM_OK=1
+          for k in CONFIG_SMP CONFIG_PREEMPT CONFIG_MODULE_UNLOAD; do
+            grep -qx "$k=y" "$DEF" && p "$k=y（vermagic 组成项）" || { f "$k 未开（vermagic 会与 vendor 模块不符）"; VM_OK=0; }
+          done
+          if [ "$VM_OK" = "1" ]; then
+            p "vermagic 四要素齐备，预期产出：4.19.110-perf+ SMP preempt mod_unload modversions aarch64"
+          fi
 
           echo "=== 4. 版本串 ==="
           # 先查 CRLF 污染：run 27 实测就是 uname.env 带 \r 导致
@@ -930,8 +956,17 @@ jobs:
           # ② ld.lld: error: relocation R_AARCH64_ABS32 cannot be used against
           #    symbol '__crc_gsi_write_channel_scratch'; recompile with -fPIC
           #    → CONFIG_MODVERSIONS 生成的 __kcrctab 段在 LLD 下要 -fPIC。
-          #      关掉 MODVERSIONS 正合本意：我们要让原厂 .ko（lcd/touch/audio）能加载，
-          #      不校验 CRC 反而更容易成功。
+          #
+          #    ★ 2026-11-16 修正结论：当初的处理是「关掉 MODVERSIONS」—— 那是错的。
+          #      关掉后 vermagic 少 modversions，原厂 vendor .ko（audio/wlan/display/touch）
+          #      全部因 vermagic 不匹配被拒载 → 内核起不来 → 落 EDL（这就是 run29 的真死因）。
+          #      正确修法有两条，本项目两条都上：
+          #        a) 换链接器：run 23 起已从 ld.lld 换成交叉 GNU ld（⑥-B），
+          #           GNU ld 对 __kcrctab 的 ABS32 重定位是宽容的，不再需要 -fPIC。
+          #        b) 保留 MODVERSIONS=y，同时开 MODULE_FORCE_LOAD=y —— 即使个别模块
+          #           CRC 对不上也仍允许加载（原厂未开此项，我们额外加保险）。
+          #      若日后又切回 LLD 并重新报此错，不要动 MODVERSIONS，改为给 __kcrctab 段
+          #      单独加 -fPIC（scripts/Makefile.build 里对 kernel/module.o 等）。
           if [ -f lib/Makefile ] && ! grep -q 'ksu_compat_string' lib/Makefile; then
             printf '%s\n' \
               '/* stpcpy: 4.19 没有；新版 clang 会把 strcpy 优化成本函数调用 */' \
@@ -1078,6 +1113,31 @@ jobs:
             fi
             strings -a "$IMG" | grep -qF "$REL" && p "内核里含版本串 $REL" || f "内核里没有 $REL（伪装没生效 → 刷了必黑屏）"
             strings -a "$IMG" | grep -qF "IKCFG_ST" && p "IKCONFIG 仍在（后续可再提 config）" || echo "  WARN  无 IKCFG_ST（不影响开机）"
+
+            # ★★★ 最关键的判据：vermagic 必须与手机端 vendor .ko 逐字一致 ★★★
+            # 手机实测原厂 .ko 的 vermagic：
+            #   4.19.110-perf+ SMP preempt mod_unload modversions aarch64
+            # run29 产物是 ... mod_unload aarch64（少 modversions）→ 全部 vendor 驱动拒载 → 掉 EDL。
+            # 这一条不过，就不要打包、不要刷 —— 省下的是一次砖。
+            echo "  --- vermagic 实测 ---"
+            VM_LINE=$(strings -a "$IMG" | grep -E "^${REL} SMP preempt" | head -1)
+            if [ -z "$VM_LINE" ]; then
+              f "Image 里找不到 vermagic 行（以 '$REL SMP preempt' 开头）"
+            else
+              echo "      实测：$VM_LINE"
+              case "$VM_LINE" in
+                *modversions*) p "vermagic 含 modversions（与 vendor .ko 一致）" ;;
+                *) f "vermagic 缺 modversions → 原厂 .ko 全部拒载 → 必掉 EDL" ;;
+              esac
+              case "$VM_LINE" in
+                *preempt*) p "vermagic 含 preempt" ;;
+                *) f "vermagic 缺 preempt" ;;
+              esac
+              case "$VM_LINE" in
+                *mod_unload*) p "vermagic 含 mod_unload" ;;
+                *) f "vermagic 缺 mod_unload" ;;
+              esac
+            fi
           else
             f "Image 不存在：$IMG"
           fi
@@ -1095,6 +1155,8 @@ jobs:
           if [ -f out/.config ]; then
             grep -qx 'CONFIG_MODULE_SIG_FORCE=y' out/.config && f "out/.config 里 MODULE_SIG_FORCE 仍为 y → vendor .ko 会被拒载" || p "MODULE_SIG_FORCE 未开"
             grep -qx 'CONFIG_KALLSYMS=y' out/.config && p "out/.config KALLSYMS=y" || f "out/.config 缺 KALLSYMS"
+            # ★ MODVERSIONS 必须真的编进内核（不是只在 defconfig 里写了）
+            grep -qx 'CONFIG_MODVERSIONS=y' out/.config && p "out/.config MODVERSIONS=y（vermagic 会带 modversions）" || f "out/.config MODVERSIONS 未开 → vermagic 会缺 modversions → 必掉 EDL"
           else
             f "out/.config 不存在，无法确认关键配置"
           fi
