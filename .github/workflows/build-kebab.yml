@@ -1120,9 +1120,16 @@ jobs:
             # run29 产物是 ... mod_unload aarch64（少 modversions）→ 全部 vendor 驱动拒载 → 掉 EDL。
             # 这一条不过，就不要打包、不要刷 —— 省下的是一次砖。
             echo "  --- vermagic 实测 ---"
-            VM_LINE=$(strings -a "$IMG" | grep -E "^${REL} SMP preempt" | head -1)
+            # ★ 注意：$REL 含 '+'（4.19.110-perf+），在 grep -E 里 '+' 是量词会破坏正则。
+            # 用 grep -F 取子串（-F 同时避免正则解析），再逐项验关键词。
+            # 另：此段必须容忍 grep 无匹配（返回 1），否则 set -e 会让步骤直接退出 —— run30 实测踩过。
+            VM_LINE=$(strings -a "$IMG" | grep -F "${REL} SMP preempt" | head -1 || true)
             if [ -z "$VM_LINE" ]; then
-              f "Image 里找不到 vermagic 行（以 '$REL SMP preempt' 开头）"
+              f "Image 里找不到 vermagic 行（应含 '$REL SMP preempt'）"
+              echo "  --- 实际含 'SMP preempt' 的行（诊断）---"
+              strings -a "$IMG" | grep -F "SMP preempt" | head -5 || echo "      (无)"
+              echo "  --- 实际含 '$REL' 的行（诊断）---"
+              strings -a "$IMG" | grep -F "$REL" | head -5 || echo "      (无)"
             else
               echo "      实测：$VM_LINE"
               case "$VM_LINE" in
