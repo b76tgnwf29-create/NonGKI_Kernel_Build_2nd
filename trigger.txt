@@ -1,1 +1,1 @@
-trigger 2026-11-16 21:27:23 run31 gate-fix
+trigger profile=minimal run32 21:54:50 二分定位kernel-EDL
