@@ -31,7 +31,7 @@ on:
         required: true
         default: 'full'
         type: choice
-        options: ['full', 'no-kpm', 'safe-defconfig']
+        options: ['full', 'no-kpm', 'minimal', 'safe-defconfig']
       debug_mode:
         description: 'BUILD_DEBUGGER（首次建议 false；true 遇 .rej 会直接失败）'
         required: false
@@ -159,7 +159,17 @@ jobs:
         shell: bash
         run: |
           set -e
-          PROFILE="${{ inputs.profile || 'safe-defconfig' }}"
+          # ★ 2026-11-16：档位来源优先级
+          #   1) workflow_dispatch 的 inputs.profile（手点 Run workflow 时）
+          #   2) trigger.txt 首行里的 "profile=xxx"（push 触发路径，默认分支不是 sample，
+          #      手动按钮不出现，只能用 trigger.txt 兜底；这行让我们也能指定档位）
+          #   3) 回落 safe-defconfig
+          PROFILE="${{ inputs.profile }}"
+          if [ -z "$PROFILE" ] && [ -f "$GITHUB_WORKSPACE/trigger.txt" ]; then
+            PROFILE=$(head -1 "$GITHUB_WORKSPACE/trigger.txt" | tr -d '\r' | sed -n 's/.*profile=\([a-z-]*\).*/\1/p')
+            [ -n "$PROFILE" ] && echo "[+] profile 来自 trigger.txt: $PROFILE"
+          fi
+          [ -z "$PROFILE" ] && PROFILE="safe-defconfig"
           echo "::group::[+] profile = $PROFILE"
           case "$PROFILE" in
             full)
@@ -168,6 +178,24 @@ jobs:
             no-kpm)
               echo "KPM_INLINE=false" >> "$GITHUB_ENV"
               echo "[+] no-kpm：KPM 不进 inline hook，sus_map 仍在（frida 检测照样能过）"
+              ;;
+            minimal)
+              # ★ 2026-11-16 新增：二分定位内核起不来的凶手。
+              # run31 已修好 vermagic（实测产物 = 4.19.110-perf+ SMP preempt mod_unload
+              # modversions aarch64，与原厂 .ko 逐字一致），但 fastboot boot 仍掉 EDL。
+              # config 逐项对比只剩预期差异（MODULE_SIG 关掉 + 19 项 KSU/SUSFS 新增），
+              # 内存布局/加固项全部相同 → 问题只可能在四个补丁组件里：
+              #   KSU（含 SUSFS）· KPM · NoMount · Baseband Guard
+              # 本档把这四个全关，只保留：版本串伪装 + defconfig + 标准内核。
+              # 判定逻辑：
+              #   minimal 能起 → 凶手在这四个里，逐个加回（最多 4 轮）即可定位
+              #   minimal 也崩 → 不是组件问题，是内核基础/工具链问题（走别的线）
+              echo "SUSFS_ENABLE=false"            >> "$GITHUB_ENV"
+              echo "KPM_INLINE=false"              >> "$GITHUB_ENV"
+              echo "NOMOUNT_ENABLE=false"          >> "$GITHUB_ENV"
+              echo "BASEBAND_GUARD_ENABLE=false"   >> "$GITHUB_ENV"
+              echo "BASEBAND_GUARD_BOOT=false"     >> "$GITHUB_ENV"
+              echo "[+] minimal：KSU/SUSFS/KPM/NoMount/BBG 全关，只验内核本体能不能起"
               ;;
             safe-defconfig)
               # 关键：**不能**改 DEFCONFIG_NAME。上游 composite action 里读的是
@@ -193,7 +221,13 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           DEF="$GITHUB_WORKSPACE/device_kernel/arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
           mkdir -p "$(dirname "$DEF")"
-          PROFILE="${{ inputs.profile || 'safe-defconfig' }}"
+          # ★ 与 ③-P 保持同一来源：先 inputs，再 trigger.txt 的 profile=xxx，最后回落。
+          PROFILE="${{ inputs.profile }}"
+          if [ -z "$PROFILE" ] && [ -f "$GITHUB_WORKSPACE/trigger.txt" ]; then
+            PROFILE=$(head -1 "$GITHUB_WORKSPACE/trigger.txt" | tr -d '\r' | sed -n 's/.*profile=\([a-z-]*\).*/\1/p')
+          fi
+          [ -z "$PROFILE" ] && PROFILE="safe-defconfig"
+          echo "[+] ④-C 使用 profile = $PROFILE"
 
           # ══════════ 0-P) 版本串预注入（任何档位都生效）══════════
           # 背景：run 25 是 trigger.txt push 触发的，inputs.profile 为空 →
@@ -481,7 +515,7 @@ jobs:
             echo "[FATAL] 找不到 $DEF"
             exit 1
           fi
-          DEF="$DEF" LOCALV="$LOCALV" python3 - <<'PYBLOCK'
+          DEF="$DEF" LOCALV="$LOCALV" BUILD_PROFILE="${BUILD_PROFILE:-full}" python3 - <<'PYBLOCK'
           import os
           p = os.environ["DEF"]
           lv = os.environ["LOCALV"]
@@ -513,9 +547,18 @@ jobs:
           out.append('# CONFIG_LOCALVERSION_AUTO is not set')
           out.append('CONFIG_KALLSYMS=y')
           out.append('CONFIG_KALLSYMS_ALL=y')
-          out.append('CONFIG_KPM=y')
-          out.append('CONFIG_KSU=y')
-          out.append('CONFIG_KSU_SUSFS=y')
+          # ★ 2026-11-16：minimal 档位不编 KSU/SUSFS/KPM，用于二分定位内核起不来的凶手。
+          # 其它档位（full / no-kpm / safe-defconfig）行为不变。
+          MINIMAL = os.environ.get("BUILD_PROFILE", "") == "minimal"
+          if MINIMAL:
+              out.append('# -- minimal profile: KSU / SUSFS / KPM 全部关闭 --')
+              out.append('# CONFIG_KPM is not set')
+              out.append('# CONFIG_KSU is not set')
+              out.append('# CONFIG_KSU_SUSFS is not set')
+          else:
+              out.append('CONFIG_KPM=y')
+              out.append('CONFIG_KSU=y')
+              out.append('CONFIG_KSU_SUSFS=y')
           out.append('CONFIG_IKCONFIG=y')
           out.append('CONFIG_IKCONFIG_PROC=y')
           out.append('# disable module sig force, otherwise vendor .ko (lcd/touch/audio) rejected')
@@ -569,9 +612,20 @@ jobs:
           echo "=== 2. 必需配置项 ==="
           # ★ CONFIG_MODVERSIONS 必须在列：原厂 =y，vendor .ko 的 vermagic 带 modversions。
           # 少了它 → 所有 vendor 驱动被拒载 → 内核起不来 → 掉 EDL（run29 的真死因）。
-          for k in CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_KPM CONFIG_MODULE_FORCE_LOAD CONFIG_KSU CONFIG_MODVERSIONS CONFIG_MODULES_USE_ELF_RELA; do
-            grep -qx "$k=y" "$DEF" && p "$k=y" || f "$k 未开"
-          done
+          # ★ minimal 档位例外：KSU/KPM 是故意关掉的（二分定位用），但 MODVERSIONS /
+          #   MODULES_USE_ELF_RELA / FORCE_LOAD 一条都不能少。
+          if [ "${BUILD_PROFILE:-full}" = "minimal" ]; then
+            for k in CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_MODULE_FORCE_LOAD CONFIG_MODVERSIONS CONFIG_MODULES_USE_ELF_RELA; do
+              grep -qx "$k=y" "$DEF" && p "$k=y" || f "$k 未开"
+            done
+            for k in CONFIG_KSU CONFIG_KPM CONFIG_KSU_SUSFS; do
+              if grep -qx "$k=y" "$DEF"; then f "$k 在 minimal 档不该为 y"; else p "$k 已关（minimal 预期）"; fi
+            done
+          else
+            for k in CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_KPM CONFIG_MODULE_FORCE_LOAD CONFIG_KSU CONFIG_MODVERSIONS CONFIG_MODULES_USE_ELF_RELA; do
+              grep -qx "$k=y" "$DEF" && p "$k=y" || f "$k 未开"
+            done
+          fi
 
           echo "=== 3. 必须关掉的项（否则 vendor 模块拒载 → 黑屏）==="
           for k in CONFIG_MODULE_SIG CONFIG_MODULE_SIG_FORCE CONFIG_MODULE_SIG_ALL CONFIG_LOCALVERSION_AUTO; do
@@ -682,6 +736,7 @@ jobs:
           fi
 
       - name: ⑤ 打 SUSFS 补丁（v2.2.00，4.19 专用）
+        if: ${{ (inputs.profile || '') != 'minimal' && !contains(github.event.head_commit.message || '', 'profile=minimal') }}
         uses: ./.github/workflows/patch-susfs
 
       # ── .rej 不再静默：落盘成可读摘要 ──
@@ -1082,9 +1137,11 @@ jobs:
         uses: ./.github/workflows/patch-droidspaces
 
       - name: ⑩ Baseband Guard
+        if: ${{ (inputs.profile || '') != 'minimal' && !contains(github.event.head_commit.message || '', 'profile=minimal') }}
         uses: ./.github/workflows/patch-baseband-guard
 
       - name: ⑪ NoMount
+        if: ${{ (inputs.profile || '') != 'minimal' && !contains(github.event.head_commit.message || '', 'profile=minimal') }}
         uses: ./.github/workflows/patch-nomount
 
       - name: ⑫ 编译内核
