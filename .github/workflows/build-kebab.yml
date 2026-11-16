@@ -31,7 +31,7 @@ on:
         required: true
         default: 'full'
         type: choice
-        options: ['full', 'no-kpm', 'minimal', 'safe-defconfig']
+        options: ['full', 'no-kpm', 'minimal', 'no-bbg', 'no-nomount', 'no-kpm2', 'safe-defconfig']
       debug_mode:
         description: 'BUILD_DEBUGGER（首次建议 false；true 遇 .rej 会直接失败）'
         required: false
@@ -196,6 +196,27 @@ jobs:
               echo "BASEBAND_GUARD_ENABLE=false"   >> "$GITHUB_ENV"
               echo "BASEBAND_GUARD_BOOT=false"     >> "$GITHUB_ENV"
               echo "[+] minimal：KSU/SUSFS/KPM/NoMount/BBG 全关，只验内核本体能不能起"
+              ;;
+            no-bbg)
+              # ★ 2026-11-16：二分第 1 轮 —— 只关 Baseband Guard，其余（KSU+SUSFS+KPM+NoMount）全开。
+              # 嫌疑依据：BBG 有 runtime deny 逻辑 hook 设备访问（baseband_guard: deny ...），
+              # 且 CONFIG_BBG_BLOCK_BOOT=y 直接在启动路径上；而内核里 'BBG'/'BLOCK_BOOT'
+              # 字符串是 0 个（只有 baseband_guard 那套）→ 配置项名与实现不对应，本身可疑。
+              #   no-bbg 能起 → 凶手就是 BBG，收工
+              #   no-bbg 仍崩 → 排除 BBG，下一轮测 no-nomount / no-kpm
+              echo "BASEBAND_GUARD_ENABLE=false"   >> "$GITHUB_ENV"
+              echo "BASEBAND_GUARD_BOOT=false"     >> "$GITHUB_ENV"
+              echo "[+] no-bbg：只关 Baseband Guard，其余组件照旧"
+              ;;
+            no-nomount)
+              # ★ 二分第 2 轮：关 NoMount（VFS 层注入，早期挂载阶段出错就起不来）
+              echo "NOMOUNT_ENABLE=false"          >> "$GITHUB_ENV"
+              echo "[+] no-nomount：只关 NoMount"
+              ;;
+            no-kpm2)
+              # ★ 二分第 3 轮：关 KPM（inline hook，与 SUSFS 有重叠）
+              echo "KPM_INLINE=false"              >> "$GITHUB_ENV"
+              echo "[+] no-kpm2：只关 KPM inline（sus_map 仍在）"
               ;;
             safe-defconfig)
               # 关键：**不能**改 DEFCONFIG_NAME。上游 composite action 里读的是
@@ -1141,11 +1162,11 @@ jobs:
         # GitHub 在作业开始前求值一次 if:，那时 inputs.profile 为空、也读不到 trigger.txt，
         # run32 实测「写了 if: 但 ⑤⑩⑪ 照样全跑」。改用 env.BUILD_PROFILE：
         # 它在 ③-P 里就已经写进 $GITHUB_ENV，且 env.* 在**每次执行步骤时**重新求值。
-        if: env.BUILD_PROFILE != 'minimal'
+        if: env.BUILD_PROFILE != 'minimal' && env.BUILD_PROFILE != 'no-bbg'
         uses: ./.github/workflows/patch-baseband-guard
 
       - name: ⑪ NoMount
-        if: env.BUILD_PROFILE != 'minimal'
+        if: env.BUILD_PROFILE != 'minimal' && env.BUILD_PROFILE != 'no-nomount'
         uses: ./.github/workflows/patch-nomount
 
       - name: ⑫ 编译内核
