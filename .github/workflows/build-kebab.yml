@@ -736,7 +736,7 @@ jobs:
           fi
 
       - name: ⑤ 打 SUSFS 补丁（v2.2.00，4.19 专用）
-        if: ${{ (inputs.profile || '') != 'minimal' && !contains(github.event.head_commit.message || '', 'profile=minimal') }}
+        if: env.BUILD_PROFILE != 'minimal'
         uses: ./.github/workflows/patch-susfs
 
       # ── .rej 不再静默：落盘成可读摘要 ──
@@ -1137,11 +1137,15 @@ jobs:
         uses: ./.github/workflows/patch-droidspaces
 
       - name: ⑩ Baseband Guard
-        if: ${{ (inputs.profile || '') != 'minimal' && !contains(github.event.head_commit.message || '', 'profile=minimal') }}
+        # ★ 2026-11-16：minimal 档跳过。不能用 `inputs.profile` 做条件 ——
+        # GitHub 在作业开始前求值一次 if:，那时 inputs.profile 为空、也读不到 trigger.txt，
+        # run32 实测「写了 if: 但 ⑤⑩⑪ 照样全跑」。改用 env.BUILD_PROFILE：
+        # 它在 ③-P 里就已经写进 $GITHUB_ENV，且 env.* 在**每次执行步骤时**重新求值。
+        if: env.BUILD_PROFILE != 'minimal'
         uses: ./.github/workflows/patch-baseband-guard
 
       - name: ⑪ NoMount
-        if: ${{ (inputs.profile || '') != 'minimal' && !contains(github.event.head_commit.message || '', 'profile=minimal') }}
+        if: env.BUILD_PROFILE != 'minimal'
         uses: ./.github/workflows/patch-nomount
 
       - name: ⑫ 编译内核
