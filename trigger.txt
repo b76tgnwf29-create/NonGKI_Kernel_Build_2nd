@@ -1,1 +1,1 @@
-trigger profile=minimal run33 22:44:15 二分定位
+trigger profile=no-bbg run34 23:01:31 只关BBG
