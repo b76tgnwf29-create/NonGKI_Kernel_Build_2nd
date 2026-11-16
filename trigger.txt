@@ -1,1 +1,1 @@
-trigger profile=minimal run32 21:54:50 二分定位kernel-EDL
+trigger profile=minimal run33 22:44:15 二分定位
